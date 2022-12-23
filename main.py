@@ -4,7 +4,6 @@ import shlex
 import string
 import time
 from json import dump, load
-from os import environ as env
 from sys import exit
 from threading import Thread
 
@@ -15,20 +14,24 @@ from MeowerBot.command import command
 import web
 from web import app
 from MeowerBot.context import Post
-from dotenv import load_dotenv
+from env import config as env
 
-load_dotenv()
+import secrets
+import requests
 
 
 # so i dont need to deal with systemd being root.
 os.chdir(os.path.dirname(__file__))
 
 
-with open("banned_ips.json") as b_ips:
-    BANNED_IPS = load(b_ips)
 
-with open("users.json") as user_doc:
-    USERS = load(user_doc)
+#combine the two db files into one
+with open("db.json") as db:
+    db = load(db)
+
+    BANNED_IPS = db.get("banned_ips", [])
+    USERS = db.get("users", {})
+    REPORTS = db.get("reports", [])
 
 def get_remote_adress(request):
     if "X-Forwarded-For" in request.headers:
@@ -41,6 +44,8 @@ meower.DISABLE_GUESTS = False # type: ignore
 app.meower = meower # type: ignore
 app.BANNED_IPS = BANNED_IPS # type: ignore
 app.USERS = USERS # type: ignore
+app.REPORTS = REPORTS # type: ignore
+app.known_tokens = {} # type: ignore
 
 meower.waiting_for_usr_input = {"usr": "", "waiting": False, "banning": ""} # type: ignore
  
@@ -57,11 +62,9 @@ if not int(version[1]) >= 2:
     exit(1)
 
 def save_db():
-    with open("banned_ips.json", "w") as f:
-        dump(BANNED_IPS, f)
+    with open("db.json", "w") as f:
+        dump({"banned_ips": BANNED_IPS, "users": USERS, "reports": REPORTS}, f, indent=4)
 
-    with open("users.json", "w") as f:
-        dump(USERS, f)
 
 class Cogs(Cog):
     def __init__(self, bot):
@@ -121,12 +124,44 @@ def on_message(message: Post , bot=meower):
     meower.run_command(message)
 
 
+def pmsg(message, listener=None):
+    cmd = message['val']
+
+    if cmd['cmd'] == "auth":
+        token = secrets.token_urlsafe(16)
+        r = requests.get(f"https://api.meower.org/users/{message['origin']}")
+        if not r.status_code == 200:
+            level = 0
+        else:
+            level = r.json()['lvl']
+
+        app.known_tokens[message['origin']] = {'token': token, 'level': level, "name": message['origin']} # type: ignore
+        if 'listener' in cmd:
+            listener = cmd['listener']
+
+            meower.wss.sendPacket({
+                "type": "pmsg",
+                
+                "val": { "username": message['origin'], "token": token, "listener": listener}
+            })
+        else:
+            meower.wss.sendPacket({
+                "type": "pmsg",
+                "val": { "username":
+                       message['origin'], "token": token}
+            })
+
+
+
 meower.callback(on_message, cbid="message")
 meower.register_cog(Cogs(meower))
+meower.callback(pmsg, cbid="pmsg")
+
+app.debug = False
 
 if __name__ == "__main__":
     profanity.load_censor_words()
-    t = Thread(target=app.run, kwargs={"host": "0.0.0.0"})
+    t = Thread(target=app.run, kwargs={"host": "0.0.0.0", "debug":False})
     t.start()
 
     try:
